@@ -13,8 +13,9 @@ int vt_4bc(struct ncplane* n, char c) {
 	// ncplane_set_bg_rgb8(n, red, green, blue)
 }
 
-int vt_8bc(struct ncplane* n, char c) {
+int vt_8bc(struct ncplane* n, char c, bool fg) {
 	// Here convert 8-bit color code from 'c' into a notcurses call
+	// if (fg), apply the change to fg, else to bg.
 	// color code table: https://en.wikipedia.org/wiki/ANSI_escape_code#8-bit
 	// Again, assume VGA pallete for lowest 16 codes.
 	// Return '-1' on failure, and '1' if succeeded
