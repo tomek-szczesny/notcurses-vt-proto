@@ -1,0 +1,3 @@
+#!/bin/bash
+gcc ncvtproto.c -g -Wall -lnotcurses-core
+./a.out
