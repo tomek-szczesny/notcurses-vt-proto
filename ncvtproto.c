@@ -9,15 +9,16 @@
 struct ncvtctx {	// VT context
 	int curmem_x;
 	int curmem_y;
-	char cbuf[20];	// Carry buffer (stuff that wasn't processed last time)	TODO: arbitrary size!
-	size_t cs;	// Carry size
+	char* cbuf;	// Carry buffer (stuff that wasn't processed last time, plus stuff currently to be processed)
+	size_t cbs;	// Carry buffer size
+	size_t cs;	// Carry size (length of stuff stored in buffer)
 };
 
 struct ncvtsms {	// VT state machine state
 	struct ncplane* n;
 	struct ncvtctx* vtctx;
-	const char* buf;
-	size_t* s;
+	//const char* buf;
+	//size_t* s;
 	ssize_t pos;	// current position
 	ssize_t lop;	// position where the last output has been produced
 };
@@ -84,22 +85,21 @@ int vt_8bpal(struct ncvtsms* s, int p, bool fg) {
 
 // Checks if current byte is outside the buffer bounds
 static inline bool vt_eob(struct ncvtsms* sms) {
-	return (sms->pos >= sms->vtctx->cs + *(sms->s));
+	return (sms->pos >= sms->vtctx->cs);
 }
 
 // Checks how many bytes are availabe in the buffer past pos
 static inline size_t vt_ppos(struct ncvtsms* sms) {
-	return (sms->vtctx->cs + *(sms->s) - sms->pos - 1);
+	return (sms->vtctx->cs - sms->pos - 1);
 }
 
-// byte fetch, from cbuf or buf accordingly
-static const char* vt_bfetch_p(const struct ncvtsms* s, size_t pos) {
-	if (pos < s->vtctx->cs) return (s->vtctx->cbuf + pos);
-	else return (s->buf + pos - s->vtctx->cs);
+// byte fetch, from cbuf
+static const inline char* vt_bfetch_p(const struct ncvtsms* s, size_t pos) {
+	return (s->vtctx->cbuf + pos);
 }
 
 // Same but always fetches the byte from current position
-static const char* vt_bfetch(const struct ncvtsms* s) {
+static const inline char* vt_bfetch(const struct ncvtsms* s) {
 	return vt_bfetch_p(s, s->pos);
 }
 
@@ -132,14 +132,13 @@ static int vt_error(struct ncvtsms* s) {
 
 // Handles end of buffer during parsing
 static int vt_end(struct ncvtsms* s) {
-	ssize_t stubp = s->lop;
-	char stub[20];		// This sucks so badly
-	while (stubp <= s->pos + vt_ppos(s)) {
-		stub[stubp-s->lop] = *vt_bfetch_p(s, stubp+1);
-		stubp++;
+	if (s->lop < s->pos) {
+		memmove(s->vtctx->cbuf, s->vtctx->cbuf + s->lop + 1, s->vtctx->cs - s->lop - 1);
+		s->vtctx->cs = s->vtctx->cs - s->lop - 1;
 	}
-	strcpy(s->vtctx->cbuf, stub);
-	s->vtctx->cs = s->pos - s->lop - 1;
+	else {
+		s->vtctx->cs = 0;
+	}
 	return 0;	// Oh jeez...
 }
 
@@ -203,15 +202,17 @@ static int vt_esc(struct ncvtsms* s) {
 	}
 }
 
-// Parsing UTF-8 EGCs
+// Parsing UTF-8 EGCs (including 1-byte ASCII)
 static int vt_utf8(struct ncvtsms* s) {
 	size_t cpl = utf8_codepoint_length(*vt_bfetch(s));
 	if (cpl <= vt_ppos(s) + 1){
-		ncplane_putegc(s->n, vt_bfetch(s), NULL);
-		s->pos += cpl - 1;
-		s->lop = s->pos; return 1;
+		int q;
+		if (ncplane_putegc(s->n, vt_bfetch(s), NULL) >= 0) {
+			s->pos += cpl - 1;
+			s->lop = s->pos; return 1;
+		}
 	}
-	else return vt_end(s);
+	return vt_end(s);
 
 
 }
@@ -226,10 +227,16 @@ ssize_t ncplane_putvt(struct ncplane* n, struct ncvtctx* vtctx, const char* buf,
 	struct ncvtsms sms;
 	sms.n = n;
 	sms.vtctx = vtctx;
-	sms.buf = buf;
-	sms.s = &s;
 	sms.pos = 0;
 	sms.lop = -1;
+
+	//fill vtctx with new buffer contents
+	if (vtctx->cs + s > vtctx->cbs) {
+		vtctx->cbuf = realloc(vtctx->cbuf, (vtctx->cs + s) * sizeof(char));
+		vtctx->cbs = vtctx->cs + s;
+	}
+	memcpy(vtctx->cbuf + vtctx->cs, buf, s);
+	vtctx->cs += s;	
 
 	// The 'base' state is case in while loop, to avoid stack overflows with arbitrarily long buffers
 	char c;
@@ -275,18 +282,21 @@ int main()
 	notcurses_render(nc);
 
 	struct ncvtctx t0ctx;
+	t0ctx.cbs = 1;
+	t0ctx.cbuf = (char*) malloc (t0ctx.cbs * sizeof(char)); // TODO - needs to be freed someday...
 	t0ctx.cs = 0;	// TODO: more elegant (and complete) vtctx initializer
 
 	FILE *fp;
 	char buf[16];
+	size_t s;
 
-	fp = popen("echo ⢠⠃⠀⡠⠞⠉⠀⠀⠉⠣ ", "r");
+	fp = popen("echo ⢠⠃⠀⡠⠞⠉⠀⠀⠉⠣ \ntoilet --gay Dupa", "r");
+	//fp = popen("toilet --gay Dupa", "r");
 	if (fp == NULL) {
 		printf("Failed to run command\n" );
 		exit(1);
 	}
 
-	size_t s;
 	while (s = fread(buf, sizeof(char), sizeof(buf), fp)) {
   		//ncplane_putnstr(t0, s, buf); 
 		ncplane_putvt(t0, &t0ctx, buf, s);
