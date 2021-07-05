@@ -1,7 +1,6 @@
 #define LIBSSH_STATIC 1
 #include "libssh/libssh.h"
 #include "notcurses/notcurses.h"
-//#include "vt_colors.h"
 #include <locale.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -22,6 +21,23 @@ struct ncvtsms {	// VT state machine state
 	ssize_t pos;	// current position
 	ssize_t lop;	// position where the last output has been produced
 };
+
+static inline size_t	// TODO: This should be in the library, dunno why I cannot call it. :/
+utf8_codepoint_length(unsigned char c){
+  if(c <= 0x7f){        // 0x000000...0x00007f
+    return 1;
+  }else if(c <= 0xc1){  // illegal continuation byte
+    return 1;
+  }else if(c <= 0xdf){  // 0x000080...0x0007ff
+    return 2;
+  }else if(c <= 0xef){  // 0x000800...0x00ffff
+    return 3;
+  }else if(c <= 0xf4){  // c <= 0xf4, 0x100000...0x10ffff
+    return 4;
+  }else{                // illegal first byte
+    return 1;
+  }
+}
 
 int vt_8bpal(struct ncvtsms* s, int p, bool fg) {
 	int r, g, b;
@@ -118,7 +134,7 @@ static int vt_error(struct ncvtsms* s) {
 static int vt_end(struct ncvtsms* s) {
 	ssize_t stubp = s->lop;
 	char stub[20];		// This sucks so badly
-	while (stubp <= s->pos) {
+	while (stubp <= s->pos + vt_ppos(s)) {
 		stub[stubp-s->lop] = *vt_bfetch_p(s, stubp+1);
 		stubp++;
 	}
@@ -154,7 +170,7 @@ static int vt_csi(struct ncvtsms* s) {
 
 	switch (f) {
 		case 0x6D:	// SGR
-			param = strtok(pb,";");	i	// TODO: Extract parameters outside case (not only SGRs use them you know)
+			param = strtok(pb,";");		// TODO: Extract parameters outside case (not only SGRs use them you know)
 			while (param != NULL) {		// TODO: Support default parameters if number is missing
 				char pc = atoi(param);
 				switch (pc) {
@@ -189,11 +205,14 @@ static int vt_esc(struct ncvtsms* s) {
 
 // Parsing UTF-8 EGCs
 static int vt_utf8(struct ncvtsms* s) {
-	// nah... some other time. 
-	// but anyway, the idea is to check if the whole datapoint is in the buffer
-	// If it is, stick it to putegc()
-	// if not, call vt_end().
-	return vt_pass(s);	
+	size_t cpl = utf8_codepoint_length(*vt_bfetch(s));
+	if (cpl <= vt_ppos(s) + 1){
+		ncplane_putegc(s->n, vt_bfetch(s), NULL);
+		s->pos += cpl - 1;
+		s->lop = s->pos; return 1;
+	}
+	else return vt_end(s);
+
 
 }
 
@@ -224,7 +243,7 @@ ssize_t ncplane_putvt(struct ncplane* n, struct ncvtctx* vtctx, const char* buf,
 		else {
 			switch (c) {	// Other cases
 				case 0x1B: r = vt_esc(&sms); break;
-				default: r = vt_pass(&sms);
+				default: r = vt_utf8(&sms);
 				
 			}
 		}
@@ -261,7 +280,7 @@ int main()
 	FILE *fp;
 	char buf[16];
 
-	fp = popen("toilet --gay Dupa", "r");
+	fp = popen("echo ⢠⠃⠀⡠⠞⠉⠀⠀⠉⠣ ", "r");
 	if (fp == NULL) {
 		printf("Failed to run command\n" );
 		exit(1);
