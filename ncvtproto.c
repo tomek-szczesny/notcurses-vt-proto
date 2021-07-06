@@ -67,7 +67,7 @@ int vt_8bpal(struct ncvtsms* s, int p, bool fg) {
 	}
 
 	else {
-		p =- 231;
+		p -= 231;
 		r = p * 8;
 		g = r;
 		b = r;
@@ -151,40 +151,81 @@ static int vt_csi(struct ncvtsms* s) {
 	// Parameter, intermediate and final bytes, as defined for CSI
 	int p = 0;
 	char pb[30];	// TODO: these arrays may need resizing! 
-	int i = 0;
-	char ib[30];
-	char f;
+	int  pi[10];	// parameter ints
+	int i = 0;	// Intermediate bytes counter
+	char ib[30];	// Intermediate bytes
+	char f;		// Final byte
+	char * delims = ";:,";
+	char * temp;	// used by strtoks
+	int it = 0;	// iteration counter
 
 	while (*vt_bfetch(s) >= 0x30 && *vt_bfetch(s) <=0x3F) {
 		pb[p] = *vt_bfetch(s); p++;
 		s->pos++; if (vt_eob(s)) return vt_end(s);
 	}
+	pb[p] = 0x00;	// limit strtok
+
 	while (*vt_bfetch(s) >= 0x20 && *vt_bfetch(s) <=0x2F) {
 		ib[i] = *vt_bfetch(s); i++;
 		s->pos++; if (vt_eob(s)) return vt_end(s);
 	}
-	f = *vt_bfetch(s);
 
-	char * param;	// This cannot be just after a label.
+	f = *vt_bfetch(s);
+	
+	// At this point we are sure the CSI is complete and we may carry on parsing it
+	
+	temp = strtok(pb, delims);
+	p = 0;
+	while (temp != NULL) {		// TODO: Support default parameters if number is missing
+		pi[p] = atoi(temp);
+		p++;
+		temp = strtok(NULL, delims);
+	}
+
+	// Intermediate bytes not parsed yet - not used by anything supported so far
 
 	switch (f) {
 		case 0x6D:	// SGR
-			param = strtok(pb,";");		// TODO: Extract parameters outside case (not only SGRs use them you know)
-			while (param != NULL) {		// TODO: Support default parameters if number is missing
-				char pc = atoi(param);
-				switch (pc) {
-					case 0:
+			for (it = 0; it < p; it++) {	
+				switch (pi[it]) {
+					case 0:				// Reset or normal
 						ncplane_set_fg_default(s->n);
 						ncplane_set_bg_default(s->n);
 						break;
+					case 38:			// Foreground color 
+						it++;
+						switch (pi[it]) {
+							case 5: 	// 8-bit palette
+								it++;
+								vt_8bpal(s, pi[it], 1);
+								break;
+							case 2:		// 24-bit RGB color
+								it++;
+								ncplane_set_fg_rgb8(s->n, pi[it], pi[it+1], pi[it+2]);
+								it += 2;
+						}
+						break;
+					case 48:			// Background color 
+						it++;
+						switch (pi[it]) {
+							case 5: 	// 8-bit palette
+								it++;
+								vt_8bpal(s, pi[it], 0);
+								break;
+							case 2:		// 24-bit RGB color
+								it++;
+								ncplane_set_bg_rgb8(s->n, pi[it], pi[it+1], pi[it+2]);
+								it += 2;
+						}
+						break;
 					// TODO support more!
-					default:
-						if (pc >= 30 && pc <=37) vt_8bpal(s, pc - 30, 1);
-						if (pc >= 90 && pc <=97) vt_8bpal(s, pc - 82, 1);
-						if (pc >= 40 && pc <=47) vt_8bpal(s, pc - 40, 0);
-						if (pc >= 100 && pc <=107) vt_8bpal(s, pc - 92, 0);
+
+					default:	// 3/4-bit colors
+						if (pi[it] >= 30 && pi[it] <=37) vt_8bpal(s, pi[it] - 30, 1);
+						if (pi[it] >= 90 && pi[it] <=97) vt_8bpal(s, pi[it] - 82, 1);
+						if (pi[it] >= 40 && pi[it] <=47) vt_8bpal(s, pi[it] - 40, 0);
+						if (pi[it] >= 100 && pi[it] <=107) vt_8bpal(s, pi[it] - 92, 0);
 				}
-				param = strtok(NULL, ";");
 			}
 			s->lop = s->pos; return 1;
 		case 0x41:	// Cursor up
@@ -260,8 +301,6 @@ ssize_t ncplane_putvt(struct ncplane* n, struct ncvtctx* vtctx, const char* buf,
 	}
 	while (r == 1);
 
-
-
 	return sms.lop;	// Might actually be greater than s, if cbuf wasn't empty.
 }
 
@@ -287,11 +326,12 @@ int main()
 	t0ctx.cs = 0;	// TODO: more elegant (and complete) vtctx initializer
 
 	FILE *fp;
-	char buf[16];
+	char buf[256];
 	size_t s;
 
-	fp = popen("echo ⢠⠃⠀⡠⠞⠉⠀⠀⠉⠣ \ntoilet --gay Dupa", "r");
-	//fp = popen("toilet --gay Dupa", "r");
+	fp = popen("cat 8bit.pattern", "r");
+	//fp = popen("echo ⢠⠃⠀⡠⠞⠉⠀⠀⠉⠣ \ntoilet --gay Dupa", "r");
+	//fp = popen("unbuffer -efq ls /home/mctom", "r");
 	if (fp == NULL) {
 		printf("Failed to run command\n" );
 		exit(1);
