@@ -5,6 +5,46 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+
+// STUFF SUPPORTED SO FAR:
+// UTF-8
+// 3/4/8/24 bit colors
+//
+// TODO:
+//
+// \e[m			// SGR (TODO: Default argument)
+// \e[2J		// Erase in display (args 0-3) 
+// \e[J			// Erase in display 0
+// \e[2d		// Line Position Absolute (Default 1)
+// \e[30X		// Erase 30 characters (Default 1)
+// \e[K			// Erase in line, args 0-2 (default 0)
+// \e[y;xH		// Move cursor to y,x
+// \e]0; ... \007 	// ESC ] = OSC, terminated with BEL (0x07) or ST (0x1b \), or nothing
+// \e[?1049h		// Alternative screen buffer
+// \e[?1049l		// Disable alternative screen buffer
+// \e[1;27r		// Set scrolling region (from, to) (default top, bottom)
+// \e[4h		// Set Mode (12 = Send/Receive; 20 = automatic newline; 4 = insert mode; +1)
+// \e[4l		// Reset Mode (2 = Keyboard Action Mode, 4 = Replace mode; +2)
+// \e[?7h		// Auto wrap mode (DECAWM)
+// \e[?25h		// Show cursor
+// \e[?25l		// Hide cursor
+// \e[?1000h		// Send Mouse X & Y on button press and release. This is the X11 xterm mouse protocol.
+// \e[?1000l		// Don't send...
+//
+// Essential:
+// \e[m \e[2j \e[J \e[2d \e[30X \e[K \e[H
+//
+// WTF SEQUENCES:
+// \e=			// Application Keypad (DECKPAM)
+// \e[?1h		// Application cursor keys (DECCKM)
+// \e[?1l		// Normal Cursor Keys
+//
+// WON'T IMPLEMENT:
+// \e(B			// G0 character set -> USASCII 
+// \e[22;0;0t		// Window Manipulation (XTWINOPS)
+// \e[?12l		// Start/Stop blinking cursor
+
+
  
 struct ncvtctx {	// VT context
 	int curmem_x;
@@ -149,11 +189,16 @@ static int vt_csi(struct ncvtsms* s) {
 	s->pos++; if (vt_eob(s)) return vt_end(s);
 
 	// Parameter, intermediate and final bytes, as defined for CSI
+	// Intermediate bytes are disabled for now, not supported by any sequence ATM
+	// Parameters are stored as ints in pi, with special cases coded as follows:
+	// -1 no value (assume default)
+	// -2 - question mark
+	
 	int p = 0;
 	char pb[30];	// TODO: these arrays may need resizing! 
 	int  pi[10];	// parameter ints
-	int i = 0;	// Intermediate bytes counter
-	char ib[30];	// Intermediate bytes
+	//int i = 0;	// Intermediate bytes counter
+	//char ib[30];	// Intermediate bytes
 	char f;		// Final byte
 	char * delims = ";:,";
 	char * temp;	// used by strtoks
@@ -165,10 +210,12 @@ static int vt_csi(struct ncvtsms* s) {
 	}
 	pb[p] = 0x00;	// limit strtok
 
+	/*
 	while (*vt_bfetch(s) >= 0x20 && *vt_bfetch(s) <=0x2F) {
 		ib[i] = *vt_bfetch(s); i++;
 		s->pos++; if (vt_eob(s)) return vt_end(s);
 	}
+	*/
 
 	f = *vt_bfetch(s);
 	
@@ -329,7 +376,7 @@ int main()
 	char buf[256];
 	size_t s;
 
-	fp = popen("cat 8bit.pattern", "r");
+	fp = popen("cat 24bit.pattern", "r");
 	//fp = popen("echo ⢠⠃⠀⡠⠞⠉⠀⠀⠉⠣ \ntoilet --gay Dupa", "r");
 	//fp = popen("unbuffer -efq ls /home/mctom", "r");
 	if (fp == NULL) {
