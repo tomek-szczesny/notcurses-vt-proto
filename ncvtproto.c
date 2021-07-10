@@ -184,97 +184,102 @@ static int vt_end(struct ncvtsms* s) {
 
 // -------------------- ACTUAL PARSING STATES
 
+static int vt_get_csi_param(struct ncvtsms* s) {
+	// parses an argument that starts at pos+1
+	// missing (default) argument is encoded as -1
+	// if no more params are available, returns -2
+	// vt_eob: -3 (should never happen)
+	// Don't feed it inconsistent data, or you'll get inconsistent results.
+	
+	
+	if (strchr(";:?[", *vt_bfetch(s)) == NULL) return -2;
+	s->pos++; if (vt_eob(s)) return -3;
+
+	int output = -1;
+	while (*vt_bfetch(s) >= 48 && *vt_bfetch(s) < 58) {
+		if (output < 0) output = 0;
+		output *= 10;
+		output += *vt_bfetch(s) - 48;		// Is this kosher?
+		s->pos++; if (vt_eob(s)) return -3;
+	}
+	return output;
+
+}
+
+
+static int vt_sgr(struct ncvtsms* s) {
+	int c;
+
+	int r, g, b;	// These are needed inside the loop, but one can't declare after the label. :/
+	bool fg;
+
+ 	c = vt_get_csi_param(s);
+	while (c > -2) {	
+		if (c == -1) c = 0;			// 0 is the default argument in all SGRs
+		switch (c) {
+			case 0:				// Reset or normal
+				ncplane_set_fg_default(s->n);
+				ncplane_set_bg_default(s->n);
+				break;
+			// TODO support more!
+			case 38:			// Foreground color 	
+			case 48:			// Background color 
+				fg = (c == 38);
+ 				c = vt_get_csi_param(s);
+				switch (c) {
+					case 5: 	// 8-bit palette
+ 						c = vt_get_csi_param(s);
+						vt_8bpal(s, c, fg);
+						break;
+					case 2:		// 24-bit RGB color
+ 						r = vt_get_csi_param(s);
+ 						g = vt_get_csi_param(s);
+ 						b = vt_get_csi_param(s);
+						if (fg) ncplane_set_fg_rgb8(s->n, r, g, b);
+						else    ncplane_set_bg_rgb8(s->n, r, g, b);
+				}
+				break;
+
+			default:	// 3/4-bit colors
+				if (c >= 30 && c <=37) vt_8bpal(s, c - 30, 1);
+				if (c >= 90 && c <=97) vt_8bpal(s, c - 82, 1);
+				if (c >= 40 && c <=47) vt_8bpal(s, c - 40, 0);
+				if (c >= 100 && c <=107) vt_8bpal(s, c - 92, 0);
+		}
+ 		c = vt_get_csi_param(s);
+	}
+	return 1;	// TODO actual return lol
+}
 // After detecting '\x1b\x5b'
 static int vt_csi(struct ncvtsms* s) {
-	s->pos++; if (vt_eob(s)) return vt_end(s);
 
 	// Parameter, intermediate and final bytes, as defined for CSI
 	// Intermediate bytes are disabled for now, not supported by any sequence ATM
-	// Parameters are stored as ints in pi, with special cases coded as follows:
-	// -1 no value (assume default)
-	// -2 - question mark
+	// The following jumps over params just to get final byte - params are parsed later.
 	
-	int p = 0;
-	char pb[30];	// TODO: these arrays may need resizing! 
-	int  pi[10];	// parameter ints
-	//int i = 0;	// Intermediate bytes counter
-	//char ib[30];	// Intermediate bytes
+	ssize_t init_pos = s->pos;
 	char f;		// Final byte
-	char * delims = ";:,";
-	char * temp;	// used by strtoks
-	int it = 0;	// iteration counter
 
+	// Jump over param bytes
+	s->pos++; if (vt_eob(s)) return vt_end(s);
 	while (*vt_bfetch(s) >= 0x30 && *vt_bfetch(s) <=0x3F) {
-		pb[p] = *vt_bfetch(s); p++;
 		s->pos++; if (vt_eob(s)) return vt_end(s);
 	}
-	pb[p] = 0x00;	// limit strtok
 
 	/*
 	while (*vt_bfetch(s) >= 0x20 && *vt_bfetch(s) <=0x2F) {
-		ib[i] = *vt_bfetch(s); i++;
 		s->pos++; if (vt_eob(s)) return vt_end(s);
 	}
 	*/
 
-	f = *vt_bfetch(s);
+	f = *vt_bfetch(s);	// Get final byte
+	s->pos = init_pos;	// Rewind pos to initial state, so param parsers don't get confused
 	
-	// At this point we are sure the CSI is complete and we may carry on parsing it
-	
-	temp = strtok(pb, delims);
-	p = 0;
-	while (temp != NULL) {		// TODO: Support default parameters if number is missing
-		pi[p] = atoi(temp);
-		p++;
-		temp = strtok(NULL, delims);
-	}
-
-	// Intermediate bytes not parsed yet - not used by anything supported so far
+	// At this point we are sure the CSI is complete and we may carry on interpreting it
 
 	switch (f) {
 		case 0x6D:	// SGR
-			for (it = 0; it < p; it++) {	
-				switch (pi[it]) {
-					case 0:				// Reset or normal
-						ncplane_set_fg_default(s->n);
-						ncplane_set_bg_default(s->n);
-						break;
-					case 38:			// Foreground color 
-						it++;
-						switch (pi[it]) {
-							case 5: 	// 8-bit palette
-								it++;
-								vt_8bpal(s, pi[it], 1);
-								break;
-							case 2:		// 24-bit RGB color
-								it++;
-								ncplane_set_fg_rgb8(s->n, pi[it], pi[it+1], pi[it+2]);
-								it += 2;
-						}
-						break;
-					case 48:			// Background color 
-						it++;
-						switch (pi[it]) {
-							case 5: 	// 8-bit palette
-								it++;
-								vt_8bpal(s, pi[it], 0);
-								break;
-							case 2:		// 24-bit RGB color
-								it++;
-								ncplane_set_bg_rgb8(s->n, pi[it], pi[it+1], pi[it+2]);
-								it += 2;
-						}
-						break;
-					// TODO support more!
-
-					default:	// 3/4-bit colors
-						if (pi[it] >= 30 && pi[it] <=37) vt_8bpal(s, pi[it] - 30, 1);
-						if (pi[it] >= 90 && pi[it] <=97) vt_8bpal(s, pi[it] - 82, 1);
-						if (pi[it] >= 40 && pi[it] <=47) vt_8bpal(s, pi[it] - 40, 0);
-						if (pi[it] >= 100 && pi[it] <=107) vt_8bpal(s, pi[it] - 92, 0);
-				}
-			}
-			s->lop = s->pos; return 1;
+			return vt_sgr(s);	
 		case 0x41:	// Cursor up
 		default: return vt_unknown(s);
 	}
