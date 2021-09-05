@@ -57,8 +57,6 @@ struct ncvtctx {	// VT context
 struct ncvtsms {	// VT state machine state
 	struct ncplane* n;
 	struct ncvtctx* vtctx;
-	//const char* buf;
-	//size_t* s;
 	ssize_t pos;	// current position
 	ssize_t lop;	// position where the last output has been produced
 };
@@ -184,9 +182,10 @@ static int vt_end(struct ncvtsms* s) {
 
 // -------------------- ACTUAL PARSING STATES
 
-static int vt_get_csi_param(struct ncvtsms* s) {
+
+static int vt_get_csi_param(struct ncvtsms* s, int def) {
 	// parses an argument that starts at pos+1
-	// missing (default) argument is encoded as -1
+	// missing (default) argument is replaced with 'def'.
 	// if no more params are available, returns -2
 	// vt_eob: -3 (should never happen)
 	// Don't feed it inconsistent data, or you'll get inconsistent results.
@@ -202,7 +201,8 @@ static int vt_get_csi_param(struct ncvtsms* s) {
 		output += *vt_bfetch(s) - 48;		// Is this kosher?
 		s->pos++; if (vt_eob(s)) return -3;
 	}
-	return output;
+	if (output == -1) return def;
+	else return output;
 
 }
 
@@ -213,9 +213,8 @@ static int vt_sgr(struct ncvtsms* s) {
 	int r, g, b;	// These are needed inside the loop, but one can't declare after the label. :/
 	bool fg;
 
- 	c = vt_get_csi_param(s);
+ 	c = vt_get_csi_param(s, 0);
 	while (c > -2) {	
-		if (c == -1) c = 0;			// 0 is the default argument in all SGRs
 		switch (c) {
 			case 0:				// Reset or normal
 				ncplane_set_fg_default(s->n);
@@ -225,16 +224,16 @@ static int vt_sgr(struct ncvtsms* s) {
 			case 38:			// Foreground color 	
 			case 48:			// Background color 
 				fg = (c == 38);
- 				c = vt_get_csi_param(s);
+ 				c = vt_get_csi_param(s, 0);
 				switch (c) {
 					case 5: 	// 8-bit palette
- 						c = vt_get_csi_param(s);
+ 						c = vt_get_csi_param(s, 0);
 						vt_8bpal(s, c, fg);
 						break;
 					case 2:		// 24-bit RGB color
- 						r = vt_get_csi_param(s);
- 						g = vt_get_csi_param(s);
- 						b = vt_get_csi_param(s);
+ 						r = vt_get_csi_param(s, 0);
+ 						g = vt_get_csi_param(s, 0);
+ 						b = vt_get_csi_param(s, 0);
 						if (fg) ncplane_set_fg_rgb8(s->n, r, g, b);
 						else    ncplane_set_bg_rgb8(s->n, r, g, b);
 				}
@@ -246,7 +245,7 @@ static int vt_sgr(struct ncvtsms* s) {
 				if (c >= 40 && c <=47) vt_8bpal(s, c - 40, 0);
 				if (c >= 100 && c <=107) vt_8bpal(s, c - 92, 0);
 		}
- 		c = vt_get_csi_param(s);
+ 		c = vt_get_csi_param(s, 0);
 	}
 	return 1;	// TODO actual return lol
 }
@@ -259,9 +258,11 @@ static int vt_csi(struct ncvtsms* s) {
 	
 	ssize_t init_pos = s->pos;
 	char f;		// Final byte
+	char ft;	// First byte (i.e. '?' for private sequences)
 
-	// Jump over param bytes
 	s->pos++; if (vt_eob(s)) return vt_end(s);
+	ft = *vt_bfetch(s);
+	// Jump over param bytes
 	while (*vt_bfetch(s) >= 0x30 && *vt_bfetch(s) <=0x3F) {
 		s->pos++; if (vt_eob(s)) return vt_end(s);
 	}
@@ -276,11 +277,53 @@ static int vt_csi(struct ncvtsms* s) {
 	s->pos = init_pos;	// Rewind pos to initial state, so param parsers don't get confused
 	
 	// At this point we are sure the CSI is complete and we may carry on interpreting it
+	
+	if (ft == '?') {	// Private sequences
+		s->pos++;
+		switch (f) {
+			case 'h':
+				return 1; // TODO
+			break;
+			case 'l':
+				return 1; // TODO
+			break;
+			default: return vt_unknown(s);
+		}
+	}
 
 	switch (f) {
-		case 0x6D:	// SGR
-			return vt_sgr(s);	
-		case 0x41:	// Cursor up
+		// Erase functions
+		case 'J':	// Erase display
+			switch (vt_get_csi_param(s, 0)){
+				case 0:
+					// Erase without moving cursor?
+					return 1;
+				case 1:
+				// What does case 1 do?
+				case 2:
+				case 3:
+					// Erase and home cursor
+					return 1;
+				default: return vt_unknown(s);
+			}; 
+		case 'K':	// Erase line, do not move cursor. Check the args.
+
+			return 1;
+		case 'X':
+				// erase n(default 1) chars after cursor, don't move the cursor.
+			return 1;
+
+		// Cursor moving functions
+		case 'd':	// Line position absolute (default 1)
+				
+			return 1;
+		case 'H':	// Move cursor to x, y (y is the first argument)
+
+			return 1;
+		
+
+		case 'A': 
+		case 0x6D: return vt_sgr(s);	
 		default: return vt_unknown(s);
 	}
 }
@@ -314,7 +357,7 @@ static int vt_utf8(struct ncvtsms* s) {
 
 ssize_t ncplane_putvt(struct ncplane* n, struct ncvtctx* vtctx, const char* buf, size_t s) {
 
-	ncplane_set_scrolling(n, 1);	// putvt makes sense only in scrollable planes.	
+	//ncplane_set_scrolling(n, 1);	// putvt makes sense only in scrollable planes.	
 	
 	// Initialize state
 	struct ncvtsms sms;
@@ -356,6 +399,80 @@ ssize_t ncplane_putvt(struct ncplane* n, struct ncvtctx* vtctx, const char* buf,
 	return sms.lop;	// Might actually be greater than s, if cbuf wasn't empty.
 }
 
+// Screw putvt, let's go full ncvt!
+// --------------------- NCVT
+
+// ----- NCVT Header ----- The following belongs to internal.h
+typedef struct ncvt {
+  struct ncplane* n;		// Internally should be without "struct"
+  struct nccell* back;		// Scrollback buffer of main (non-alt) buffer - also stores non-alt buffer when in alt mode.
+  				// 'back' is intended as fized size circular buffer, row-wise
+  size_t back_len;		// Length of scrollback buffer (shall never change after creation!)
+  size_t back_pos;		// Position of most recent entry in 'back'.
+  				// if back_pos < back_len, ignore content beyond back_pos (not filled yet)
+				// else treat the buffer as circular, with (back_pos % back_len) as the most recent row
+  size_t scrlbl_t, scrlbl_b;	// Scrollable region's top and bottom, covers whole screen by default TODO: initialize it
+
+
+  int curmemx, curmemy;		// Stores cursor position, if a proper command is issued
+  char* cbuf;			// carry buffer of input streams, stores stuff that has not been processed in the last iteration
+  size_t cbs;			// carry buffer size
+  size_t cs;			// carry size (len of stuff stored in cbuf)
+
+  ssize_t pos, lop;		// State machine variables
+
+} ncvt;
+
+// ----- NCVT options ----- This should go to notcurses.h
+// Not used for now
+/*
+typedef struct ncvt_options {
+
+} ncvt_options;
+*/
+
+ncvt* ncvt_create(struct ncplane* n) { //, ncprogbar_options* opts) {
+	/*
+	if (opts == NULL) {
+		ncvt_options default_opts;	// For any reason that usually was outside if statement
+		memset(&default_opts, 0, sizeof(default_opts));
+		opts = &default_opts;
+	}
+	// Interpret options here
+	*/
+
+	ncvt* ret = malloc(sizeof(*ret));
+	if (!ret) return ret;
+
+	ret->n = n;
+	ret->back = malloc(sizeof(nccell));	// TODO initialize it properly
+	ret->back_pos = 0;
+	
+	ret->curmemx = 0;
+	ret->curmemy = 0;
+
+	ret->cbs = 1;
+	ret->cs = 0;
+	ret->cbuf = (char*) malloc (ret->cbs * sizeof(char)); // TODO - needs to be freed someday...
+
+	// TODO: Check if mallocs succeeded 
+	return ret;
+}
+
+struct ncplane* ncvt_plane(ncvt* n) {
+	return n->n;
+}
+
+void ncvt_destroy(struct ncvt* n) {
+
+	free(n->cbuf);
+	free(n->back);
+	free(n->n);
+	free(n);
+	// TODO: That's it?
+}
+
+
 // --------------------- MAIN (proof-of-concept test)
 
 int main()
@@ -381,8 +498,8 @@ int main()
 	char buf[256];
 	size_t s;
 
-	fp = popen("cat 24bit.pattern", "r");
-	//fp = popen("echo ⢠⠃⠀⡠⠞⠉⠀⠀⠉⠣ \ntoilet --gay Dupa", "r");
+	//fp = popen("cat 24bit.pattern", "r");
+	fp = popen("echo ⢠⠃⠀⡠⠞⠉⠀⠀⠉⠣ \ntoilet --gay Dupa", "r");
 	//fp = popen("unbuffer -efq ls /home/mctom", "r");
 	if (fp == NULL) {
 		printf("Failed to run command\n" );
