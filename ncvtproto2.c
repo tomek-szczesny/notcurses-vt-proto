@@ -47,19 +47,179 @@
 
  
 struct ncvtctx {	// VT context
-	int curmem_x;
+	struct ncplane* n;
+	char* ibuf;	// Input buffer (stuff that wasn't processed last time, plus stuff currently to be processed)
+	size_t ibs;	// Input buffer size
+	size_t bcs;	// Buffer contents size
+	ssize_t pos;	// Current position in buffer (last byte read)
+	ssize_t lop;	// Position of last byte that has been processed successfully
+
+	int curmem_x;   // Cursor position memory - used by some esc sequences
 	int curmem_y;
-	char* cbuf;	// Carry buffer (stuff that wasn't processed last time, plus stuff currently to be processed)
-	size_t cbs;	// Carry buffer size
-	size_t cs;	// Carry size (length of stuff stored in buffer)
 };
 
-struct ncvtsms {	// VT state machine state
-	struct ncplane* n;
-	struct ncvtctx* vtctx;
-	ssize_t pos;	// current position
-	ssize_t lop;	// position where the last output has been produced
-};
+inline int
+vtctx_init(struct ncvtctx* vtctx, struct ncplane* n) {
+
+	vtctx->n = n;
+	vtctx->pos = 0;
+	vtctx->lop = -1;
+
+	// Initialize internal buffer
+	vtctx->ibs = 1;							// Buffer grows as needed, but never shrinks
+	vtctx->ibuf = (char*) malloc (vtctx->ibs * sizeof(char)); 	// TODO - needs to be freed someday...
+	vtctx->bcs = 0;
+	
+	return 0;							// TODO: Return something meaningful
+}
+
+int
+vtctx_put(struct ncvtctx* vtctx, char* in, size_t len) {
+
+	// Expand vtctx buffer if needed
+	// Constant input buffer size is expected, but there may be leftovers from previous processing
+	if (vtctx->bcs + len > vtctx->ibs) {
+		vtctx-icbuf = realloc(vtctx->ibuf, (vtctx->bcs + len) * sizeof(char));
+		vtctx->ibs = vtctx->bcs + len;
+	}
+
+	// Copy stuff into the vtctx buffer
+	memcpy(vtctx->ibuf + vtctx->bcs, in, len);
+	vtctx->bcs += len;	
+
+	// TODO: Shrink the vtctx input buffer if less than half (?) is in use
+	
+	vtctx_process(vtctx);
+	vtctx_cleanup(vtctx);
+
+	return 0;							// TODO: Return something meaningful
+}
+
+static int	// Process data in internal buffer and produce output
+vtctx_process(struct ncvtctx* vtctx) {
+
+	vtctx->pos = -1;
+	vtctx->lop = -1;
+	
+	int b;	// A currently processed byte
+
+	// Bytes are processed as integers, with the following special cases:
+	// -1 : End of buffer (returned by fetching/peeking functions)
+	// -2 : No number found (returned by 'fetch number')
+
+	while (vtctx_rem(vtctx) > 0) {
+
+		b = vtctx_pb(vtctx);
+		if (b < 0) return -1;
+
+		if (b >= 0xC0 && b < 0xFE) {	// UTF-8 EGC
+			vtctx_utf8(vtctx);
+			continue;
+		}
+
+		if (b == 0x1B) {		// ESC sequence
+			vtctx->pos++;
+			b = vtctx_pb(vtctx);
+			if (b == 0x5B) {
+				vtctx->pos++;
+				vtctx_csi(vtctx);
+				continue;
+			}
+			// if nothing fits, print "\e" and carry on as if it was 1-byte EGC
+			ncplane_putstr(vtctx->n, "\\e");
+			continue;
+		}
+
+		// For everything else, treat it as UTF-8 EGC
+		vtctx_utf8(vtctx);
+
+	}
+
+	return 0;
+
+}
+
+static int		// Do things after all buffer data has been processed (preserve interrupted sequences)
+vtctx_cleanup(struct ncvtctx* vtctx) {
+
+	// Move unprocessed stuff to the beginning of the buffer
+	if (vtctx->lop < vtctx->pos) {
+		memmove(vtctx->ibuf, vtctx->ibuf + vtctx->lop + 1, vtctx->bcs - vtctx->lop - 1);
+		vtctx->bcs = vtctx->bcs - vtctx->lop - 1;
+	}
+	else {
+		vtctx->bcs = 0;
+	}
+	return 0;							// TODO: Return something meaningful
+}
+
+static inline int	// Remaining bytes for processing
+vtctx_rem(struct ncvtctx* vtctx) {
+	return vtctx->bcs - vtctx->pos - 1;
+}
+
+static int		// Fetch byte; -1 means end of buffer
+vtctx_fb(struct ncvtctx* vtctx) {
+	if (vtctx_rem(vtctx) <= 0) return -1;
+	else {
+		vtctx->pos++;
+		return *(vtctx->ibuf + vtctx->pos);
+	}
+}
+
+static int		// Peek byte without pos++; -1 means end of buffer
+vtctx_pb(struct ncvtctx* vtctx) {
+	if (vtctx_rem(vtctx) <= 0) return -1;
+	else {
+		return *(vtctx->ibuf + vtctx->pos + 1);
+	}
+}
+
+static int		// Fetch number
+vtctx_fn(struct ncvtctx* vtctx) {
+			// Returns -1 on end of buffer
+			// Returns -2 if no number found (pos remains unchanged)
+
+	int output = -1;
+	int digit = vtctx_pb(vtctx);
+
+	while (digit >= 48 && digit < 58) {
+		if (output == -1) output = 0;
+		output *= 10;
+		output += digit - 48;			// Is this kosher?
+		vtctx->pos++;
+		digit = vtctx_pb(vtctx);
+	}
+	
+	// If end of buffer has been reached, consider the whole number invalid
+	if (digit == -1) return -1;
+
+	// If no single digit has been found, return -2
+	if (output == -1) return -2;
+
+	return output;
+}
+
+
+static int // Parsing UTF-8 EGCs from current pos (including 1-byte ASCII)
+vt_utf8(struct ncvtctx* vtctx) {
+	
+	size_t cpl = utf8_codepoint_length(vtctx_pb(vtctx));	// TODO: cast int to u_char
+
+	if (cpl <= vtctx_rem(vtctx)){
+		if (ncplane_putegc(vtctx->n, vtctx->ibuf + vtctx->pos + 1, NULL) >= 0) {
+			vtctx->pos += cpl;
+			vtctx->lop = vtctx->pos; return 1;
+		}
+		else;		// TODO: Else what?
+	}
+	else {
+		// On failure due to end of buffer, push 'pos' forward anyway to stop the processing loop
+		vtctx->pos += cpl;
+		return -1;
+	}
+
+}
 
 static inline size_t	// TODO: This should be in the library, dunno why I cannot call it. :/
 utf8_codepoint_length(unsigned char c){
@@ -77,6 +237,149 @@ utf8_codepoint_length(unsigned char c){
     return 1;
   }
 }
+
+// After detecting '\x1b\x5b'
+static int vtctx_csi(struct ncvtctx* vtctx) {
+
+	// CSI structure is a mess:
+	// 0x1B 0x5B [[first byte] parameters] [intermediate] final
+	// Only first two bytes and final byte are mandatory.
+	//
+	// First byte of parameters array may or may not have special meaning.
+	// For example, '?' means a completely different set of functions, called private CSIs.
+	// Internally first byte is treated as a part of parameters list.
+	// 
+	// parameters are unsigned integers separated by semicolons (usually). Numbers between semicolons
+	// may be missing, or even too few arguments may be given, or none given at all. In such
+	// cases, each CSI function may assume different default values or behavior.
+	//
+	// Intermediate bytes are not implemented for now as no supported CSI use them.
+	// Final byte is always given and determine the actual function.
+	//
+	// The strategy here is to fetch first byte, pointer to first byte, and final byte.
+	// First byte decides on a subset of functions. Final byte picks a concrete function, and finally
+	// parameters are extracted one by one, depending on the function.
+	//
+	// The following jumps over params just to get final byte - params are parsed later.
+	
+	int first_byte;
+	char* params;
+	int last_byte;
+	int last_byte_pos;		// position in vtctx internal buffer
+
+	first_byte = vtctx_fb(vtctx);
+	params = vtctx->ibuf + vtctx->pos;
+
+	// Jump over remaining param bytes
+	int b = vtctx_pb(vtctx);
+	while (b >= 0x30 && b <=0x3F) {
+		vtctx->pos++;
+		b = vtctx_pb(vtctx);
+	}
+
+	last_byte = vtctx_fb(vtctx);
+
+	// Check if we're not over the vtctx internal buffer
+	if (last_byte == -1) return -1;
+
+	// Now depending on first byte and last byte, we pick a function and execute it
+
+	ssize_t init_pos = s->pos;V
+	char f;		// Final byte
+	char ft;	// First byte (i.e. '?' for private sequences)
+
+	s->pos++; if (vt_eob(s)) return vt_end(s);
+	ft = *vt_bfetch(s);
+	// Jump over param bytes
+	while (*vt_bfetch(s) >= 0x30 && *vt_bfetch(s) <=0x3F) {
+		s->pos++; if (vt_eob(s)) return vt_end(s);
+	}
+
+	/*
+	while (*vt_bfetch(s) >= 0x20 && *vt_bfetch(s) <=0x2F) {
+		s->pos++; if (vt_eob(s)) return vt_end(s);
+	}
+	*/
+
+	f = *vt_bfetch(s);	// Get final byte
+	s->pos = init_pos;	// Rewind pos to initial state, so param parsers don't get confused
+	
+	// At this point we are sure the CSI is complete and we may carry on interpreting it
+	
+	if (ft == '?') {	// Private sequences
+		s->pos++;
+		switch (f) {
+			case 'h':
+				return 1; // TODO
+			break;
+			case 'l':
+				return 1; // TODO
+			break;
+			default: return vt_unknown(s);
+		}
+	}
+
+	switch (f) {
+		// Erase functions
+		case 'J':	// Erase display
+			switch (vt_get_csi_param(s, 0)){
+				case 0:
+					// Erase without moving cursor?
+					return 1;
+				case 1:
+				// What does case 1 do?
+				case 2:
+				case 3:
+					// Erase and home cursor
+					return 1;
+				default: return vt_unknown(s);
+			}; 
+		case 'K':	// Erase line, do not move cursor. Check the args.
+
+			return 1;
+		case 'X':
+				// erase n(default 1) chars after cursor, don't move the cursor.
+			return 1;
+
+		// Cursor moving functions
+		case 'd':	// Line position absolute (default 1)
+				
+			return 1;
+		case 'H':	// Move cursor to x, y (y is the first argument)
+
+			return 1;
+		
+
+		case 'A': 
+		case 0x6D: return vt_sgr(s);	
+		default: return vt_unknown(s);
+	}
+}
+
+
+
+
+
+
+// Below the legacy
+//
+//
+//
+//
+//
+//
+
+
+
+
+
+struct ncvtsms {	// VT state machine state
+	struct ncplane* n;
+	struct ncvtctx* vtctx;
+	ssize_t pos;	// current position
+	ssize_t lop;	// position where the last output has been produced
+};
+
 
 int vt_8bpal(struct ncvtsms* s, int p, bool fg) {
 	int r, g, b;
